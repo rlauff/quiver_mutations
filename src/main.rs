@@ -25,6 +25,7 @@ struct QuiverApp {
     // NEW: A stack to remember previous states for the undo functionality.
     // We store a tuple of (Vertices, Edges) representing a snapshot in time.
     history: Vec<(Vec<Vertex>, Vec<Edge>)>,
+    future: Vec<(Vec<Vertex>, Vec<Edge>)>,
 }
 
 impl Default for QuiverApp {
@@ -34,6 +35,7 @@ impl Default for QuiverApp {
             edges: Vec::new(),
             selected_for_edge: None,
             history: Vec::new(), // Initialize the history stack empty
+            future: Vec::new(), // Initialize the future stack empty
         }
     }
 }
@@ -144,6 +146,16 @@ impl eframe::App for QuiverApp {
                 // The button is only enabled if there is something in the history stack
                 if ui.add_enabled(!self.history.is_empty(), egui::Button::new("Undo")).clicked() {
                     if let Some((old_vertices, old_edges)) = self.history.pop() {
+                        self.future.push((self.vertices.clone(), self.edges.clone())); // Save the undone state for potential redo
+                        self.vertices = old_vertices;
+                        self.edges = old_edges;
+                        self.selected_for_edge = None; // Reset interaction state to prevent bugs
+                    }
+                }
+
+                if ui.add_enabled(!self.future.is_empty(), egui::Button::new("Redo")).clicked() {
+                    if let Some((old_vertices, old_edges)) = self.future.pop() {
+                        self.history.push((self.vertices.clone(), self.edges.clone())); // Save the redone state for potential undo
                         self.vertices = old_vertices;
                         self.edges = old_edges;
                         self.selected_for_edge = None; // Reset interaction state to prevent bugs
