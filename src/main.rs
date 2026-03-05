@@ -1,6 +1,4 @@
 use eframe::egui;
-use std::collections::HashMap;
-
 use rand::prelude::IteratorRandom;
 
 
@@ -10,33 +8,76 @@ struct Vertex {
     pos: egui::Pos2,
 }
 
-/// A directed edge between two vertices
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct Edge {
-    from: usize, // Index of the source vertex in the vertices list
-    to: usize,   // Index of the target vertex in the vertices list
+#[derive(Clone)]
+struct Quiver {
+    num_vertices: usize,
+    weights: [[isize; 200]; 200] // lookup table for the weights
+}
+
+impl Quiver {
+    fn new_empty() -> Self {
+        Quiver {
+            num_vertices: 0,
+            weights: [[0;200];200],
+        }
+    }
+
+    fn add_vertex(&mut self) {
+        self.num_vertices += 1;
+    }
+
+    fn add_edge(&mut self, from: usize, to: usize) {
+        self.weights[from][to] += 1;
+        self.weights[to][from] -= 1;
+    }
+
+    fn mutate_at(&mut self, k: usize) {
+        // i -> k -> j: add edges:
+        for i in 0..self.num_vertices {
+            if i == k { continue };
+            for j in 0..self.num_vertices {
+                if j == k || j == i { continue };
+                let ik = self.weights[i][k];
+                let kj = self.weights[k][j];
+                if ik > 0 && kj > 0 {
+                    self.weights[i][j] += ik*kj;
+                    self.weights[j][i] -= ik*kj;
+                }
+            }
+        }
+        // flip directions at k
+        for i in 0..self.num_vertices-1 {
+            self.weights[i][k] = -self.weights[i][k];
+            self.weights[k][i] = -self.weights[k][i];
+        }
+    }
 }
 
 /// The main application state
 struct QuiverApp {
     vertices: Vec<Vertex>,
-    edges: Vec<Edge>,
+    quiver: Quiver,
     
     // State to keep track of the first vertex clicked when trying to draw an edge
     selected_for_edge: Option<usize>,
 
+    // NEW: State to keep track of the vertex currently being dragged.
+    // This prevents losing the vertex when moving the mouse too quickly.
+    dragged_vertex: Option<usize>,
+
     // NEW: A stack to remember previous states for the undo functionality.
     // We store a tuple of (Vertices, Edges) representing a snapshot in time.
-    history: Vec<(Vec<Vertex>, Vec<Edge>)>,
-    future: Vec<(Vec<Vertex>, Vec<Edge>)>,
+    history: Vec<(Vec<Vertex>, Quiver)>,
+    future: Vec<(Vec<Vertex>, Quiver)>,
 }
 
 impl Default for QuiverApp {
     fn default() -> Self {
         Self {
             vertices: Vec::new(),
-            edges: Vec::new(),
+            quiver: Quiver::new_empty(),
             selected_for_edge: None,
+            dragged_vertex: None, // Initialize with no vertex being dragged
             history: Vec::new(), // Initialize the history stack empty
             future: Vec::new(), // Initialize the future stack empty
         }
@@ -46,74 +87,12 @@ impl Default for QuiverApp {
 impl QuiverApp {
     /// NEW: Helper function to save the current state before making changes
     fn save_state(&mut self) {
-        self.history.push((self.vertices.clone(), self.edges.clone()));
+        self.history.push((self.vertices.clone(), self.quiver.clone()));
     }
 
     /// Applies a quiver mutation at the given vertex index
     fn mutate_at(&mut self, k: usize) {
-        // 1. Identify paths: i -> k -> j
-        let mut new_edges = Vec::new();
-
-        let incoming_to_k: Vec<_> = self.edges.iter().filter(|e| e.to == k).cloned().collect();
-        let outgoing_from_k: Vec<_> = self.edges.iter().filter(|e| e.from == k).cloned().collect();
-
-        // For every pair of (incoming, outgoing), we create a new edge from i to j
-        for in_edge in &incoming_to_k {
-            for out_edge in &outgoing_from_k {
-                if in_edge.from != out_edge.to { // Avoid self-loops
-                     new_edges.push(Edge {
-                        from: in_edge.from,
-                        to: out_edge.to,
-                    });
-                }
-            }
-        }
-
-        // Add the newly created edges to our main list
-        self.edges.extend(new_edges);
-
-        // 2. Reverse all edges connected to k
-        for edge in self.edges.iter_mut() {
-            if edge.from == k {
-                edge.from = edge.to;
-                edge.to = k;
-            } else if edge.to == k {
-                edge.to = edge.from;
-                edge.from = k;
-            }
-        }
-
-        // 3. Cancel 2-cycles
-        self.cancel_two_cycles();
-    }
-
-    /// Finds and removes pairs of edges that form a 2-cycle
-    fn cancel_two_cycles(&mut self) {
-        let mut to_remove = Vec::new();
-        let n = self.edges.len();
-
-        for i in 0..n {
-            if to_remove.contains(&i) { continue; }
-            for j in (i + 1)..n {
-                if to_remove.contains(&j) { continue; }
-                
-                let e1 = &self.edges[i];
-                let e2 = &self.edges[j];
-
-                // If e1 goes A -> B and e2 goes B -> A, they form a 2-cycle
-                if e1.from == e2.to && e1.to == e2.from {
-                    to_remove.push(i);
-                    to_remove.push(j);
-                    break;
-                }
-            }
-        }
-
-        to_remove.sort_unstable();
-        to_remove.dedup();
-        for index in to_remove.into_iter().rev() {
-            self.edges.remove(index);
-        }
+        self.quiver.mutate_at(k);
     }
 }
 
@@ -126,22 +105,24 @@ impl eframe::App for QuiverApp {
             ui.label("- Drag vertices to move them.");
             ui.label("- Left-click Vertex A, then Vertex B to draw an edge A -> B.");
             ui.label("- Ctrl + Left-click a vertex to perform a mutation at that vertex.");
+            ui.label("- Ctrl + Left-click on empty space to add a new vertex there.");
 
             ui.horizontal(|ui| {
                 if ui.button("Add Vertex").clicked() {
                     self.save_state(); // Save state before adding a vertex
-                    let center = ctx.screen_rect().center();
+                    let center = ctx.content_rect().center();
                     let offset = (self.vertices.len() as f32 * 15.0) % 60.0; 
                     
                     self.vertices.push(Vertex {
                         pos: egui::pos2(center.x + offset, center.y + offset),
                     });
+                    self.quiver.add_vertex();
                 }
                 
                 if ui.button("Clear All").clicked() {
                     self.save_state(); // Save state before clearing
+                    self.quiver = Quiver::new_empty();
                     self.vertices.clear();
-                    self.edges.clear();
                     self.selected_for_edge = None;
                 }
 
@@ -158,19 +139,19 @@ impl eframe::App for QuiverApp {
 
                 // The button is only enabled if there is something in the history stack
                 if ui.add_enabled(!self.history.is_empty(), egui::Button::new("Undo")).clicked() {
-                    if let Some((old_vertices, old_edges)) = self.history.pop() {
-                        self.future.push((self.vertices.clone(), self.edges.clone())); // Save the undone state for potential redo
+                    if let Some((old_vertices, old_quiver)) = self.history.pop() {
+                        self.future.push((self.vertices.clone(), self.quiver.clone())); // Save the undone state for potential redo
                         self.vertices = old_vertices;
-                        self.edges = old_edges;
+                        self.quiver = old_quiver;
                         self.selected_for_edge = None; // Reset interaction state to prevent bugs
                     }
                 }
 
                 if ui.add_enabled(!self.future.is_empty(), egui::Button::new("Redo")).clicked() {
-                    if let Some((old_vertices, old_edges)) = self.future.pop() {
-                        self.history.push((self.vertices.clone(), self.edges.clone())); // Save the redone state for potential undo
+                    if let Some((old_vertices, old_quiver)) = self.future.pop() {
+                        self.history.push((self.vertices.clone(), self.quiver.clone())); // Save the redone state for potential undo
                         self.vertices = old_vertices;
-                        self.edges = old_edges;
+                        self.quiver = old_quiver;
                         self.selected_for_edge = None; // Reset interaction state to prevent bugs
                     }
                 }
@@ -185,40 +166,37 @@ impl eframe::App for QuiverApp {
 
             let pointer_pos = response.interact_pointer_pos();
 
-            // 1. Group edges by multiplicity so we only draw one line per unique edge
-            let mut edge_counts: HashMap<(usize, usize), usize> = HashMap::new();
-            for edge in &self.edges {
-                *edge_counts.entry((edge.from, edge.to)).or_insert(0) += 1;
-            }
+            if self.quiver.num_vertices == 0 { return };
 
-            // 2. Draw Edges and their Multiplicities
-            for (&(from, to), &count) in &edge_counts {
-                let p1 = self.vertices[from].pos;
-                let p2 = self.vertices[to].pos;
+            // Draw Edges and their Multiplicities
+            for from in 0..self.quiver.num_vertices {
+                for to in 0..self.quiver.num_vertices {
+                    let weight = self.quiver.weights[from][to];
+                    if weight <= 0 { continue };
+                    let p1 = self.vertices[from].pos;
+                    let p2 = self.vertices[to].pos;
 
-                // Draw the line
-                painter.line_segment(
-                    [p1, p2],
-                    egui::Stroke::new(2.0, egui::Color32::BLACK),
-                );
+                    // Draw the line
+                    painter.line_segment(
+                        [p1, p2],
+                        egui::Stroke::new(2.0, egui::Color32::BLACK),
+                    );
 
-                let dir = (p2 - p1).normalized();
-                let normal = egui::vec2(-dir.y, dir.x);
-                
-                // Draw the arrowhead
-                let arrow_pos = p1 + dir * (p1.distance(p2) * 0.75); 
-                let head_size = 8.0;
-                painter.line_segment(
-                    [arrow_pos, arrow_pos - dir * head_size + normal * (head_size * 0.5)],
-                    egui::Stroke::new(2.0, egui::Color32::BLACK),
-                );
-                painter.line_segment(
-                    [arrow_pos, arrow_pos - dir * head_size - normal * (head_size * 0.5)],
-                    egui::Stroke::new(2.0, egui::Color32::BLACK),
-                );
+                    let dir = (p2 - p1).normalized();
+                    let normal = egui::vec2(-dir.y, dir.x);
+                    
+                    // Draw the arrowhead
+                    let arrow_pos = p1 + dir * (p1.distance(p2) * 0.75); 
+                    let head_size = 8.0;
+                    painter.line_segment(
+                        [arrow_pos, arrow_pos - dir * head_size + normal * (head_size * 0.5)],
+                        egui::Stroke::new(2.0, egui::Color32::BLACK),
+                    );
+                    painter.line_segment(
+                        [arrow_pos, arrow_pos - dir * head_size - normal * (head_size * 0.5)],
+                        egui::Stroke::new(2.0, egui::Color32::BLACK),
+                    );
 
-                // If multiplicity is > 1, draw the number slightly above the middle of the edge
-                if count > 1 {
                     let mid_pos = p1 + dir * (p1.distance(p2) * 0.5);
                     let text_pos = mid_pos + normal * 12.0; // Offset perpendicular to the line
 
@@ -229,10 +207,12 @@ impl eframe::App for QuiverApp {
                         egui::Color32::WHITE.linear_multiply(0.8),
                     );
 
+                    let weight_str = if weight>1 { weight.to_string() } else { "".to_string() };
+
                     painter.text(
                         text_pos,
                         egui::Align2::CENTER_CENTER,
-                        count.to_string(),
+                        weight_str,
                         egui::FontId::proportional(14.0),
                         egui::Color32::RED,
                     );
@@ -278,8 +258,8 @@ impl eframe::App for QuiverApp {
 
             // 4. Handle Canvas Interaction
             if response.clicked() {
+                let is_ctrl_down = ui.input(|i| i.modifiers.ctrl);
                 if let Some(clicked_idx) = hovered_vertex {
-                    let is_ctrl_down = ui.input(|i| i.modifiers.ctrl);
 
                     if is_ctrl_down {
                         self.save_state(); // Save state before mutation
@@ -289,10 +269,7 @@ impl eframe::App for QuiverApp {
                         if let Some(start_idx) = self.selected_for_edge {
                             if start_idx != clicked_idx {
                                 self.save_state(); // Save state before establishing a new edge
-                                self.edges.push(Edge {
-                                    from: start_idx,
-                                    to: clicked_idx,
-                                });
+                                self.quiver.add_edge(start_idx, clicked_idx);
                             }
                             self.selected_for_edge = None;
                         } else {
@@ -301,18 +278,38 @@ impl eframe::App for QuiverApp {
                     }
                 } else {
                     self.selected_for_edge = None;
+                    // check if ctrl is down, if so, add a vertex:
+                    if is_ctrl_down {
+                        // Extract the exact position where the user clicked
+                        if let Some(click_pos) = pointer_pos {
+                            self.save_state(); // Save state before adding a vertex
+                            self.vertices.push(Vertex {
+                                pos: click_pos, 
+                            });
+                            self.quiver.add_vertex();
+                        }
+                    }
                 }
             }
 
-            // Handle Dragging
+            // 5. Handle Dragging
+            // When the drag starts, we "grab" the vertex currently under the pointer
+            if response.drag_started() {
+                self.dragged_vertex = hovered_vertex;
+            }
+
+            // While dragging, we update the position of the grabbed vertex
             if response.dragged() {
-                if let Some(hovered_idx) = hovered_vertex {
-                    if let Some(_pos) = pointer_pos {
-                        // Note: We intentionally do NOT save state during dragging to avoid 
-                        // flooding the undo stack with micro-movements.
-                        self.vertices[hovered_idx].pos += ui.input(|i| i.pointer.delta());
-                    }
+                if let Some(dragged_idx) = self.dragged_vertex {
+                    // Note: We intentionally do NOT save state during dragging to avoid 
+                    // flooding the undo stack with micro-movements.
+                    self.vertices[dragged_idx].pos += ui.input(|i| i.pointer.delta());
                 }
+            }
+
+            // When the drag is released, we let go of the vertex
+            if response.drag_stopped() {
+                self.dragged_vertex = None;
             }
         });
     }
