@@ -1,6 +1,9 @@
 use eframe::egui;
 use std::collections::HashMap;
 
+use rand::prelude::IteratorRandom;
+
+
 /// A simple struct to represent a vertex in our quiver
 #[derive(Clone, Copy)]
 struct Vertex {
@@ -142,7 +145,17 @@ impl eframe::App for QuiverApp {
                     self.selected_for_edge = None;
                 }
 
-                // NEW: Undo Button
+                if ui.button("Random Mutation").clicked() {
+                    for _ in 0..100 {
+                        if !self.vertices.is_empty() {
+                            self.save_state(); // Save state before random mutation
+                            let mut rng = rand::rng();
+                            let random_vertex = (0..self.vertices.len()).choose(&mut rng).unwrap();
+                            self.mutate_at(random_vertex);
+                        }
+                    }
+                }
+
                 // The button is only enabled if there is something in the history stack
                 if ui.add_enabled(!self.history.is_empty(), egui::Button::new("Undo")).clicked() {
                     if let Some((old_vertices, old_edges)) = self.history.pop() {
